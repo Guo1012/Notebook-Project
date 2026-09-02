@@ -110,6 +110,81 @@ export function useNotebookDocument(
     }
   }, [document])
 
+  const saveExecutionResult = useCallback(
+    async (
+      cellId: string,
+      outputs: nbformat.IOutput[],
+      executionCount: number | null,
+    ) => {
+      if (!document) {
+        throw new Error('Notebook not loaded')
+      }
+
+      try {
+        setSaving(true)
+        setError(null)
+
+        const cells = [...document.content.cells]
+
+        const index = cells.findIndex(
+          (cell) => cell.id === cellId,
+        )
+
+        if (index < 0) {
+          throw new Error(
+            `Cell not found: ${cellId}`,
+          )
+        }
+
+        const cell = cells[index]
+
+        if (cell.cell_type !== 'code') {
+          throw new Error(
+            'Only code cells can receive outputs',
+          )
+        }
+
+        cells[index] = {
+          ...cell,
+          outputs,
+          execution_count: executionCount,
+        }
+
+        const nextContent = {
+          ...document.content,
+          cells,
+        }
+
+        const saved = await saveNotebook({
+          notebookId: document.notebookId,
+          revision: document.revision,
+          content: nextContent,
+        })
+
+        setDocument({
+          ...saved,
+          dirty: false,
+        })
+      } catch (e) {
+        if (
+          String(e).includes(
+            'REVISION_CONFLICT',
+          )
+        ) {
+          setError(
+            'Notebook 已在其他位置被修改，当前版本无法直接保存。',
+          )
+        } else {
+          setError(String(e))
+        }
+
+        throw e
+      } finally {
+        setSaving(false)
+      }
+    },
+    [document],
+  )
 
   return {
     document,
@@ -118,5 +193,6 @@ export function useNotebookDocument(
     error,
     updateCellSource,
     save,
+    saveExecutionResult,
   }
 }
