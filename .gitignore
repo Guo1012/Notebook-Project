@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+notebook-service/.venv/
+
+# Runtime test data
+notebook-service/data/
+
+# Frontend
+portal-web/node_modules/
+portal-web/dist/
+
+# macOS
+.DS_Store
