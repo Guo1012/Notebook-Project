@@ -1,4 +1,4 @@
-# Jupyter 概念验证前端 & 文件服务
+# Jupyter 概念验证
 
 ## portal-web: 测试演示前端
 
