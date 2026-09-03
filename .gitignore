@@ -6,6 +6,7 @@ notebook-service/.venv/
 
 # Runtime test data
 notebook-service/data/
+runtime-service/data
 
 # Frontend
 portal-web/node_modules/
