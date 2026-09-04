@@ -64,6 +64,47 @@ def test_legacy_put_conflict_keeps_old_error_shape(client, legacy_repo):
     }
 
 
+def test_legacy_rename_updates_title_and_revision(client, legacy_repo):
+    content = {
+        "nbformat": 4,
+        "metadata": {"lumen": {"title": "Old title"}},
+        "cells": [],
+    }
+    notebook_id = client.post(
+        "/api/notebooks", json={"content": content}
+    ).json()["notebookId"]
+
+    response = client.patch(
+        f"/api/notebooks/{notebook_id}", json={"title": "  New title  "}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "New title"
+    assert response.json()["revision"] == 2
+    assert response.json()["content"]["metadata"]["lumen"]["title"] == "New title"
+    assert client.get("/api/notebooks").json()["items"][0]["title"] == "New title"
+
+
+def test_legacy_delete_removes_notebook(client, legacy_repo):
+    notebook_id = client.post(
+        "/api/notebooks", json={"content": {"nbformat": 4, "cells": []}}
+    ).json()["notebookId"]
+
+    response = client.delete(f"/api/notebooks/{notebook_id}")
+
+    assert response.status_code == 204
+    assert client.get(f"/api/notebooks/{notebook_id}").status_code == 404
+    assert client.get("/api/notebooks").json() == {"items": []}
+
+
+def test_legacy_rename_and_delete_not_found(client, legacy_repo):
+    missing = "nb_000000000000"
+    assert client.patch(
+        f"/api/notebooks/{missing}", json={"title": "New title"}
+    ).status_code == 404
+    assert client.delete(f"/api/notebooks/{missing}").status_code == 404
+
+
 def test_legacy_validation_error_keeps_default_422_shape(client):
     response = client.post("/api/notebooks", json={})
     assert response.status_code == 422

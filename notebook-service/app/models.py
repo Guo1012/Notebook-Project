@@ -12,6 +12,10 @@ class SaveNotebookRequest(BaseModel):
     content: dict[str, Any]
 
 
+class RenameNotebookRequest(BaseModel):
+    title: str
+
+
 class NotebookResponse(BaseModel):
     notebookId: str
     revision: int

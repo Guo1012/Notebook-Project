@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from ..models import CreateNotebookRequest, SaveNotebookRequest
+from ..models import CreateNotebookRequest, RenameNotebookRequest, SaveNotebookRequest
 from ..repository import LocalNotebookRepository, NotebookNotFound, RevisionConflict
 
 router = APIRouter(include_in_schema=False)
@@ -102,3 +102,27 @@ def save_notebook(
         "revision": revision,
         "content": content,
     }
+
+
+@router.patch("/api/notebooks/{notebook_id}")
+def rename_notebook(notebook_id: str, req: RenameNotebookRequest):
+    title = req.title.strip() or "未命名 Notebook"
+    try:
+        revision, content = repository.rename(notebook_id, title)
+    except NotebookNotFound:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+    return {
+        "notebookId": notebook_id,
+        "title": title,
+        "revision": revision,
+        "content": content,
+    }
+
+
+@router.delete("/api/notebooks/{notebook_id}", status_code=204)
+def delete_notebook(notebook_id: str):
+    try:
+        repository.delete(notebook_id)
+    except NotebookNotFound:
+        raise HTTPException(status_code=404, detail="Notebook not found")

@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Any
+from datetime import datetime, timezone
 import json
+import shutil
 import uuid
 
 
@@ -122,6 +124,32 @@ class LocalNotebookRepository:
         )
 
         return new_revision, content
+
+    def rename(
+        self,
+        notebook_id: str,
+        title: str,
+    ) -> tuple[int, dict[str, Any]]:
+        revision, content = self.get(notebook_id)
+        metadata = content.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            content["metadata"] = metadata
+        lumen = metadata.setdefault("lumen", {})
+        if not isinstance(lumen, dict):
+            lumen = {}
+            metadata["lumen"] = lumen
+        lumen["title"] = title
+        lumen["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return self.save(notebook_id, revision, content)
+
+    def delete(self, notebook_id: str) -> None:
+        directory = self._notebook_dir(notebook_id)
+        if directory.parent.resolve() != self.data_dir.resolve() or not (
+            directory / "meta.json"
+        ).is_file():
+            raise NotebookNotFound()
+        shutil.rmtree(directory)
 
     def _write_revision(
         self,

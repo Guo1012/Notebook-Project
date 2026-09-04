@@ -8,7 +8,11 @@ from pydantic import BaseModel, Field
 from ..auth import COOKIE_NAME, CurrentUser, create_session_token, require_user
 
 
-router = APIRouter(prefix="/api/auth", tags=["Development authentication"])
+router = APIRouter(
+    prefix="/api/auth",
+    tags=["Development authentication"],
+    include_in_schema=False,
+)
 
 
 class LoginRequest(BaseModel):

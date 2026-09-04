@@ -1,0 +1,638 @@
+openapi: 3.1.0
+info:
+  title: Notebook Service API
+  version: 1.0.0-draft.1
+paths:
+  /api/v1/notebooks:
+    post:
+      tags:
+      - Notebooks
+      summary: Create Notebook
+      operationId: createNotebook
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          title: Idempotency-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotebookRequest'
+      responses:
+        '201':
+          description: Notebook 已创建；幂等重放返回相同资源和相同业务结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotebookDocumentResponse'
+          headers:
+            Location:
+              description: 新建 Notebook 的资源路径
+              schema:
+                type: string
+            ETag:
+              description: 当前响应中 Notebook revision 的实体标签
+              schema:
+                type: string
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+        '400':
+          description: 请求体不是合法 JSON
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 相同幂等键被用于不同的请求内容
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: 请求体或 Notebook 内容超过部署限制
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 请求结构错误或 content 不符合 nbformat 4
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 未预期的服务内部错误
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Notebook 持久化依赖暂时不可用
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+            Retry-After:
+              description: 建议客户端等待的秒数
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/notebooks/{notebookId}:
+    get:
+      tags:
+      - Notebooks
+      summary: Get Notebook
+      operationId: getNotebook
+      parameters:
+      - name: notebookId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^nb_[A-Za-z0-9_-]{12,64}$
+          title: Notebookid
+      - name: If-None-Match
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: 最新 Notebook 文档
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotebookDocumentResponse'
+          headers:
+            ETag:
+              description: 当前响应中 Notebook revision 的实体标签
+              schema:
+                type: string
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+        '304':
+          description: 客户端持有的 ETag 仍对应当前 revision
+          headers:
+            ETag:
+              description: 当前响应中 Notebook revision 的实体标签
+              schema:
+                type: string
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+        '404':
+          description: Notebook 不存在
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 请求字段、路径参数或请求头不符合契约
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 未预期的服务内部错误
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Notebook 持久化依赖暂时不可用
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+            Retry-After:
+              description: 建议客户端等待的秒数
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      tags:
+      - Notebooks
+      summary: Save Notebook
+      operationId: saveNotebook
+      parameters:
+      - name: notebookId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^nb_[A-Za-z0-9_-]{12,64}$
+          title: Notebookid
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          title: Idempotency-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveNotebookRequest'
+      responses:
+        '200':
+          description: 保存成功、内容未变化，或命中相同请求的幂等重放。响应不重复返回完整 content
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveNotebookResponse'
+          headers:
+            ETag:
+              description: 当前响应中 Notebook revision 的实体标签
+              schema:
+                type: string
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+        '400':
+          description: 请求体不是合法 JSON
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Notebook 不存在
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Revision 冲突或幂等键被用于不同请求
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: 请求体或 Notebook 内容超过部署限制
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 请求结构错误或 content 不符合 nbformat 4
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 未预期的服务内部错误
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Notebook 持久化依赖暂时不可用
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+            Retry-After:
+              description: 建议客户端等待的秒数
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/notebooks/{notebookId}/revisions/{revision}:
+    get:
+      tags:
+      - Notebooks
+      summary: Get Notebook Revision
+      operationId: getNotebookRevision
+      parameters:
+      - name: notebookId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^nb_[A-Za-z0-9_-]{12,64}$
+          title: Notebookid
+      - name: revision
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+          title: Revision
+      - name: If-None-Match
+        in: header
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: 指定 revision 的完整 Notebook 文档
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotebookDocumentResponse'
+          headers:
+            ETag:
+              description: 当前响应中 Notebook revision 的实体标签
+              schema:
+                type: string
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+        '304':
+          description: 客户端持有的 ETag 已对应此不可变 revision
+          headers:
+            ETag:
+              description: 当前响应中 Notebook revision 的实体标签
+              schema:
+                type: string
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+        '404':
+          description: Notebook 或 revision 不存在
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 请求字段、路径参数或请求头不符合契约
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 未预期的服务内部错误
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Notebook 持久化依赖暂时不可用
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+            Retry-After:
+              description: 建议客户端等待的秒数
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /health/live:
+    get:
+      tags:
+      - Health
+      summary: Get Liveness
+      operationId: getLiveness
+      responses:
+        '200':
+          description: 服务进程存活
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /health/ready:
+    get:
+      tags:
+      - Health
+      summary: Get Readiness
+      operationId: getReadiness
+      responses:
+        '200':
+          description: 所有必要依赖可用
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Notebook 持久化依赖暂时不可用
+          headers:
+            X-Request-ID:
+              description: 用于日志关联和故障排查的请求 ID
+              schema:
+                type: string
+            Retry-After:
+              description: 建议客户端等待的秒数
+              schema:
+                type: integer
+                minimum: 0.0
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    CreateNotebookRequest:
+      properties:
+        title:
+          anyOf:
+          - type: string
+            maxLength: 255
+            minLength: 1
+          - type: 'null'
+          title: Title
+        content:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Content
+      additionalProperties: false
+      type: object
+      title: CreateNotebookRequest
+    ErrorBody:
+      properties:
+        code:
+          type: string
+          title: Code
+        message:
+          type: string
+          title: Message
+        requestId:
+          type: string
+          title: Requestid
+        details:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Details
+      additionalProperties: false
+      type: object
+      required:
+      - code
+      - message
+      - requestId
+      title: ErrorBody
+    ErrorResponse:
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'
+      additionalProperties: false
+      type: object
+      required:
+      - error
+      title: ErrorResponse
+    HealthResponse:
+      properties:
+        status:
+          type: string
+          const: ok
+          title: Status
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      title: HealthResponse
+    NotebookDocumentResponse:
+      properties:
+        notebookId:
+          type: string
+          pattern: ^nb_[A-Za-z0-9_-]{12,64}$
+          title: Notebookid
+        title:
+          type: string
+          title: Title
+        revision:
+          type: integer
+          minimum: 1.0
+          title: Revision
+        contentHash:
+          type: string
+          pattern: ^sha256:[0-9a-f]{64}$
+          title: Contenthash
+        createdAt:
+          type: string
+          title: Createdat
+        updatedAt:
+          type: string
+          title: Updatedat
+        content:
+          additionalProperties: true
+          type: object
+          title: Content
+      additionalProperties: false
+      type: object
+      required:
+      - notebookId
+      - title
+      - revision
+      - contentHash
+      - createdAt
+      - updatedAt
+      - content
+      title: NotebookDocumentResponse
+    SaveNotebookRequest:
+      properties:
+        baseRevision:
+          type: integer
+          minimum: 1.0
+          title: Baserevision
+        content:
+          additionalProperties: true
+          type: object
+          title: Content
+      additionalProperties: false
+      type: object
+      required:
+      - baseRevision
+      - content
+      title: SaveNotebookRequest
+    SaveNotebookResponse:
+      properties:
+        notebookId:
+          type: string
+          pattern: ^nb_[A-Za-z0-9_-]{12,64}$
+          title: Notebookid
+        revision:
+          type: integer
+          minimum: 1.0
+          title: Revision
+        contentHash:
+          type: string
+          pattern: ^sha256:[0-9a-f]{64}$
+          title: Contenthash
+        updatedAt:
+          type: string
+          title: Updatedat
+        unchanged:
+          type: boolean
+          title: Unchanged
+      additionalProperties: false
+      type: object
+      required:
+      - notebookId
+      - revision
+      - contentHash
+      - updatedAt
+      - unchanged
+      title: SaveNotebookResponse
