@@ -1,147 +1,82 @@
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 import json
+import sqlite3
 import uuid
 
+from .auth import CurrentUser, hash_password, verify_password
+from .database import Database
 
-class NotebookNotFound(Exception):
-    pass
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-
+class NotebookNotFound(Exception): pass
 class RevisionConflict(Exception):
-    def __init__(self, current_revision: int):
-        self.current_revision = current_revision
+    def __init__(self, current_revision: int): self.current_revision = current_revision
+class UsernameExists(Exception): pass
 
+class UserRepository:
+    def __init__(self, database: Database): self.database = database
 
-class LocalNotebookRepository:
-    def __init__(self, data_dir: Path):
-        self.data_dir = data_dir
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+    def create(self, username: str, display_name: str, password: str) -> CurrentUser:
+        user = CurrentUser(f"usr_{uuid.uuid4().hex[:12]}", username, display_name)
+        try:
+            with self.database.connect() as connection:
+                connection.execute("INSERT INTO users VALUES (?, ?, ?, ?, 'ACTIVE', ?)", (user.user_id, user.username, user.display_name, hash_password(password), now_iso()))
+        except sqlite3.IntegrityError as error:
+            raise UsernameExists() from error
+        return user
 
-    def _notebook_dir(self, notebook_id: str) -> Path:
-        return self.data_dir / notebook_id
+    def authenticate(self, username: str, password: str) -> CurrentUser | None:
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE username = ? AND status = 'ACTIVE'", (username,)).fetchone()
+        if row is None or not verify_password(password, row["password_hash"]): return None
+        return CurrentUser(row["user_id"], row["username"], row["display_name"])
 
-    def _read_meta(self, notebook_id: str) -> dict:
-        path = self._notebook_dir(notebook_id) / "meta.json"
+class NotebookRepository:
+    def __init__(self, database: Database): self.database = database
 
-        if not path.exists():
-            raise NotebookNotFound()
+    def create(self, owner_user_id: str, title: str, content: dict[str, Any]) -> dict:
+        notebook_id, timestamp = f"nb_{uuid.uuid4().hex[:12]}", now_iso()
+        with self.database.connect() as connection:
+            connection.execute("INSERT INTO notebooks VALUES (?, ?, ?, 1, ?, ?)", (notebook_id, owner_user_id, title, timestamp, timestamp))
+            connection.execute("INSERT INTO notebook_revisions VALUES (?, 1, ?, ?)", (notebook_id, json.dumps(content, ensure_ascii=False), timestamp))
+        return self.get(owner_user_id, notebook_id)
 
-        return json.loads(path.read_text())
+    def list(self, owner_user_id: str) -> list[dict]:
+        with self.database.connect() as connection:
+            rows = connection.execute("""SELECT n.*, r.content_json FROM notebooks n JOIN notebook_revisions r ON r.notebook_id=n.notebook_id AND r.revision=n.current_revision WHERE n.owner_user_id=? ORDER BY n.updated_at DESC""", (owner_user_id,)).fetchall()
+        return [self._to_record(row) for row in rows]
 
-    def _read_revision(
-        self,
-        notebook_id: str,
-        revision: int,
-    ) -> dict[str, Any]:
-        path = (
-            self._notebook_dir(notebook_id)
-            / f"{revision}.ipynb"
-        )
+    def get(self, owner_user_id: str, notebook_id: str) -> dict:
+        with self.database.connect() as connection:
+            row = connection.execute("""SELECT n.*, r.content_json FROM notebooks n JOIN notebook_revisions r ON r.notebook_id=n.notebook_id AND r.revision=n.current_revision WHERE n.notebook_id=? AND n.owner_user_id=?""", (notebook_id, owner_user_id)).fetchone()
+        if row is None: raise NotebookNotFound()
+        return self._to_record(row)
 
-        if not path.exists():
-            raise NotebookNotFound()
+    def save(self, owner_user_id: str, notebook_id: str, base_revision: int, content: dict, title: str | None) -> dict:
+        timestamp = now_iso()
+        with self.database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT current_revision,title FROM notebooks WHERE notebook_id=? AND owner_user_id=?", (notebook_id, owner_user_id)).fetchone()
+            if row is None: raise NotebookNotFound()
+            if row["current_revision"] != base_revision: raise RevisionConflict(row["current_revision"])
+            revision = base_revision + 1
+            connection.execute("INSERT INTO notebook_revisions VALUES (?, ?, ?, ?)", (notebook_id, revision, json.dumps(content, ensure_ascii=False), timestamp))
+            connection.execute("UPDATE notebooks SET title=?,current_revision=?,updated_at=? WHERE notebook_id=?", (title or row["title"], revision, timestamp, notebook_id))
+        return self.get(owner_user_id, notebook_id)
 
-        return json.loads(path.read_text())
+    def rename(self, owner_user_id: str, notebook_id: str, title: str) -> dict:
+        with self.database.connect() as connection:
+            cursor = connection.execute("UPDATE notebooks SET title=?,updated_at=? WHERE notebook_id=? AND owner_user_id=?", (title, now_iso(), notebook_id, owner_user_id))
+            if cursor.rowcount == 0: raise NotebookNotFound()
+        return self.get(owner_user_id, notebook_id)
 
-    def create(
-        self,
-        content: dict[str, Any],
-    ) -> tuple[str, int, dict[str, Any]]:
-        notebook_id = f"nb_{uuid.uuid4().hex[:12]}"
-        revision = 1
+    def delete(self, owner_user_id: str, notebook_id: str) -> None:
+        with self.database.connect() as connection:
+            cursor = connection.execute("DELETE FROM notebooks WHERE notebook_id=? AND owner_user_id=?", (notebook_id, owner_user_id))
+            if cursor.rowcount == 0: raise NotebookNotFound()
 
-        directory = self._notebook_dir(notebook_id)
-        directory.mkdir(parents=True)
-
-        self._write_revision(
-            notebook_id,
-            revision,
-            content,
-        )
-
-        self._write_meta(
-            notebook_id,
-            revision,
-        )
-
-        return notebook_id, revision, content
-
-    def get(
-        self,
-        notebook_id: str,
-    ) -> tuple[int, dict[str, Any]]:
-        meta = self._read_meta(notebook_id)
-        revision = meta["currentRevision"]
-
-        content = self._read_revision(
-            notebook_id,
-            revision,
-        )
-
-        return revision, content
-
-    def save(
-        self,
-        notebook_id: str,
-        base_revision: int,
-        content: dict[str, Any],
-    ) -> tuple[int, dict[str, Any]]:
-        meta = self._read_meta(notebook_id)
-
-        current_revision = meta["currentRevision"]
-
-        if base_revision != current_revision:
-            raise RevisionConflict(current_revision)
-
-        new_revision = current_revision + 1
-
-        self._write_revision(
-            notebook_id,
-            new_revision,
-            content,
-        )
-
-        self._write_meta(
-            notebook_id,
-            new_revision,
-        )
-
-        return new_revision, content
-
-    def _write_revision(
-        self,
-        notebook_id: str,
-        revision: int,
-        content: dict[str, Any],
-    ) -> None:
-        path = (
-            self._notebook_dir(notebook_id)
-            / f"{revision}.ipynb"
-        )
-
-        path.write_text(
-            json.dumps(
-                content,
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-
-    def _write_meta(
-        self,
-        notebook_id: str,
-        revision: int,
-    ) -> None:
-        path = self._notebook_dir(notebook_id) / "meta.json"
-
-        path.write_text(
-            json.dumps(
-                {
-                    "notebookId": notebook_id,
-                    "currentRevision": revision,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+    @staticmethod
+    def _to_record(row) -> dict:
+        return {"notebookId": row["notebook_id"], "title": row["title"], "revision": row["current_revision"], "content": json.loads(row["content_json"]), "createdAt": row["created_at"], "updatedAt": row["updated_at"]}

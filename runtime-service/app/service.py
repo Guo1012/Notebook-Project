@@ -1,288 +1,121 @@
-from datetime import (
-    datetime,
-    timezone,
-)
-from pathlib import Path
-import secrets
+from datetime import datetime, timezone
+import sqlite3
+import hashlib
+import hmac
+import os
+import threading
+import time
 import uuid
+from .models import DesiredState, RuntimeRecord, RuntimeState
+from .repository import RuntimeRepository
+from .providers.base import ProviderRuntimeRef, RuntimeProvider, RuntimeSpec
 
-from .models import (
-    RuntimeRecord,
-    RuntimeState,
-)
+ALLOWED_TRANSITIONS = {
+    RuntimeState.QUEUED: {RuntimeState.REQUESTED, RuntimeState.FAILED, RuntimeState.STOPPING},
+    RuntimeState.REQUESTED: {RuntimeState.PROVISIONING, RuntimeState.FAILED, RuntimeState.STOPPING},
+    RuntimeState.PROVISIONING: {RuntimeState.STARTING, RuntimeState.FAILED, RuntimeState.STOPPING},
+    RuntimeState.STARTING: {RuntimeState.READY, RuntimeState.FAILED, RuntimeState.STOPPING},
+    RuntimeState.READY: {RuntimeState.FAILED, RuntimeState.STOPPING},
+    RuntimeState.STOPPING: {RuntimeState.STOPPED, RuntimeState.FAILED},
+    RuntimeState.FAILED: {RuntimeState.STOPPED},
+    RuntimeState.STOPPED: set(),
+}
 
-from .providers.base import (
-    ProviderRuntimeRef,
-    RuntimeSpec,
-)
+def now_iso() -> str: return datetime.now(timezone.utc).isoformat()
 
-from .providers.docker import (
-    DockerRuntimeProvider,
-)
-
-from .repository import (
-    RuntimeRepository,
-)
-
-
-def now_iso() -> str:
-    return datetime.now(
-        timezone.utc
-    ).isoformat()
-
+class InvalidRuntimeTransition(Exception): pass
 
 class RuntimeService:
+    def __init__(self, repository: RuntimeRepository | None = None, provider: RuntimeProvider | None = None):
+        self.repository = repository or RuntimeRepository()
+        self.provider = provider
+        self._provisioning_ids: set[str] = set()
+        self._provisioning_lock = threading.Lock()
 
-    IMAGE = (
-        "quay.io/jupyter/"
-        "base-notebook:2026-07-28"
-    )
-
-    ACTIVE_STATES = {
-        RuntimeState.REQUESTED,
-        RuntimeState.PROVISIONING,
-        RuntimeState.STARTING,
-        RuntimeState.READY,
-    }
-
-    def __init__(self):
-
-        db_path = (
-            Path(__file__)
-            .parent
-            .parent
-            / "data"
-            / "runtime.db"
-        )
-
-        self.repository = RuntimeRepository(
-            db_path
-        )
-
-        self.provider = (
-            DockerRuntimeProvider()
-        )
-
-    def create_runtime(
-        self,
-        notebook_id: str,
-        profile: str,
-    ) -> RuntimeRecord:
-
-        existing = (
-            self.repository
-            .find_active_by_notebook(
-                notebook_id
-            )
-        )
-
+    def ensure_user_runtime(self, user_id: str, profile: str) -> RuntimeRecord:
+        existing = self.repository.find_active_by_user(user_id)
         if existing:
-            existing = self.reconcile_runtime(
-                existing
-            )
-
-            if (
-                existing.state
-                in self.ACTIVE_STATES
-            ):
-                return existing
-
-        runtime_id = (
-            f"rt_{uuid.uuid4().hex[:12]}"
-        )
-
+            if self.provider and existing.state == RuntimeState.REQUESTED:
+                self._start_provision(existing.runtime_id)
+            return existing
         timestamp = now_iso()
-
-        runtime = RuntimeRecord(
-            runtime_id=runtime_id,
-            notebook_id=notebook_id,
-            profile=profile,
-
-            state=RuntimeState.REQUESTED,
-
-            provider="docker",
-            provider_ref=None,
-
-            jupyter_token=(
-                secrets.token_urlsafe(32)
-            ),
-
-            created_at=timestamp,
-            updated_at=timestamp,
-        )
-
-        self.repository.create(runtime)
-
-        runtime.state = (
-            RuntimeState.PROVISIONING
-        )
-
-        runtime.updated_at = now_iso()
-
-        self.repository.update(runtime)
-
-        try:
-            ref = self.provider.create(
-                RuntimeSpec(
-                    runtime_id=runtime.runtime_id,
-                    notebook_id=runtime.notebook_id,
-                    image=self.IMAGE,
-                    jupyter_token=runtime.jupyter_token,
-                )
-            )
-
-            runtime.provider_ref = ref.id
-
-            runtime.state = (
-                RuntimeState.STARTING
-            )
-
-            runtime.updated_at = now_iso()
-
-            self.repository.update(runtime)
-
-            return self.reconcile_runtime(
-                runtime
-            )
-
-        except Exception:
-            runtime.state = (
-                RuntimeState.FAILED
-            )
-
-            runtime.updated_at = now_iso()
-
-            self.repository.update(runtime)
-
+        runtime = RuntimeRecord(f"rt_{uuid.uuid4().hex[:12]}", user_id, profile, RuntimeState.REQUESTED, DesiredState.RUNNING, "unassigned", None, timestamp, timestamp, timestamp, None)
+        try: self.repository.create(runtime)
+        except sqlite3.IntegrityError:
+            existing = self.repository.find_active_by_user(user_id)
+            if existing: return existing
             raise
-
-    def get_runtime(
-        self,
-        runtime_id: str,
-    ) -> RuntimeRecord | None:
-
-        runtime = self.repository.get(
-            runtime_id
-        )
-
-        if runtime is None:
-            return None
-
-        return self.reconcile_runtime(
-            runtime
-        )
-
-    def reconcile_runtime(
-        self,
-        runtime: RuntimeRecord,
-    ) -> RuntimeRecord:
-
-        if runtime.state == RuntimeState.STOPPED:
-            return runtime
-
-        if runtime.provider_ref is None:
-            if runtime.state in self.ACTIVE_STATES:
-                runtime.state = (
-                    RuntimeState.FAILED
-                )
-
-                runtime.updated_at = now_iso()
-
-                self.repository.update(
-                    runtime
-                )
-
-            return runtime
-
-        status = self.provider.inspect(
-            ProviderRuntimeRef(
-                id=runtime.provider_ref
-            )
-        )
-
-        if not status.running:
-            new_state = RuntimeState.FAILED
-
-        elif status.ready:
-            new_state = RuntimeState.READY
-
-        else:
-            new_state = RuntimeState.STARTING
-
-        if runtime.state != new_state:
-
-            runtime.state = new_state
-            runtime.updated_at = now_iso()
-
-            self.repository.update(runtime)
-
+        if self.provider:
+            self._start_provision(runtime.runtime_id)
         return runtime
 
-    def reconcile_all(self) -> None:
+    def _start_provision(self, runtime_id: str) -> None:
+        with self._provisioning_lock:
+            if runtime_id in self._provisioning_ids: return
+            self._provisioning_ids.add(runtime_id)
+        def run():
+            try: self._provision(runtime_id)
+            finally:
+                with self._provisioning_lock: self._provisioning_ids.discard(runtime_id)
+        threading.Thread(target=run, daemon=True).start()
 
-        runtimes = (
-            self.repository
-            .list_non_stopped()
-        )
+    def get_user_runtime(self, user_id: str) -> RuntimeRecord | None:
+        return self.repository.find_active_by_user(user_id)
 
-        for runtime in runtimes:
-            self.reconcile_runtime(
-                runtime
-            )
-
-    def terminate_runtime(
-        self,
-        runtime_id: str,
-    ) -> RuntimeRecord | None:
-
-        runtime = self.repository.get(
-            runtime_id
-        )
-
-        if runtime is None:
-            return None
-
+    def request_stop(self, user_id: str) -> RuntimeRecord | None:
+        runtime = self.repository.find_active_by_user(user_id)
+        if runtime is None: return None
+        runtime.desired_state = DesiredState.STOPPED
+        if runtime.state != RuntimeState.STOPPING: self.transition(runtime, RuntimeState.STOPPING)
+        if not self.provider:
+            return runtime
         if runtime.provider_ref:
-            self.provider.terminate(
-                ProviderRuntimeRef(
-                    id=runtime.provider_ref
-                )
-            )
-
-        runtime.state = (
-            RuntimeState.STOPPED
-        )
-
-        runtime.updated_at = now_iso()
-
-        self.repository.update(runtime)
-
+            try: self.provider.terminate(ProviderRuntimeRef(runtime.provider_ref))
+            except Exception as error:
+                return self.transition(runtime, RuntimeState.FAILED, failure_reason=str(error))
+        self.transition(runtime, RuntimeState.STOPPED)
         return runtime
 
-    def get_connection(
-        self,
-        runtime_id: str,
-    ):
-        runtime = self.get_runtime(
-            runtime_id
-        )
+    def get_connection(self, runtime_id: str, user_id: str):
+        runtime = self.repository.get_for_user(runtime_id, user_id)
+        if not runtime: return None
+        if runtime.state != RuntimeState.READY or not runtime.provider_ref or not self.provider: return runtime, None
+        endpoint = self.provider.get_endpoint(ProviderRuntimeRef(runtime.provider_ref))
+        return runtime, {"host": endpoint.host, "port": endpoint.port, "token": self.runtime_token(runtime.runtime_id)}
 
-        if runtime is None:
-            return None, None
+    @staticmethod
+    def runtime_token(runtime_id: str) -> str:
+        secret = os.getenv("LUMEN_RUNTIME_TOKEN_SECRET", "development-runtime-token-change-me").encode()
+        return hmac.new(secret, runtime_id.encode(), hashlib.sha256).hexdigest()
 
-        if (
-            runtime.state
-            != RuntimeState.READY
-        ):
-            return runtime, None
+    def _provision(self, runtime_id: str) -> None:
+        runtime = self.repository.get(runtime_id)
+        if not runtime or not self.provider or runtime.state != RuntimeState.REQUESTED: return
+        try:
+            self.transition(runtime, RuntimeState.PROVISIONING, provider="docker")
+            image = os.getenv("LUMEN_JUPYTER_IMAGE", "quay.io/jupyter/minimal-notebook:python-3.12")
+            ref = self.provider.create(RuntimeSpec(runtime.runtime_id, runtime.owner_user_id, image, self.runtime_token(runtime.runtime_id)))
+            self.transition(runtime, RuntimeState.STARTING, provider_ref=ref.id)
+            deadline = time.monotonic() + int(os.getenv("LUMEN_RUNTIME_START_TIMEOUT", "90"))
+            while time.monotonic() < deadline:
+                status = self.provider.inspect(ref)
+                if status.ready:
+                    self.transition(runtime, RuntimeState.READY)
+                    return
+                if not status.running: raise RuntimeError(status.detail or "Jupyter container stopped")
+                time.sleep(0.5)
+            raise TimeoutError("Jupyter Server startup timed out")
+        except Exception as error:
+            current = self.repository.get(runtime_id)
+            if current and current.state not in (RuntimeState.FAILED, RuntimeState.STOPPED):
+                try: self.transition(current, RuntimeState.FAILED, failure_reason=str(error))
+                except InvalidRuntimeTransition: pass
 
-        if runtime.provider_ref is None:
-            return runtime, None
-
-        endpoint = self.provider.get_endpoint(
-            ProviderRuntimeRef(
-                id=runtime.provider_ref
-            )
-        )
-
-        return runtime, endpoint
+    def transition(self, runtime: RuntimeRecord, state: RuntimeState, *, provider: str | None = None, provider_ref: str | None = None, failure_reason: str | None = None) -> RuntimeRecord:
+        if state not in ALLOWED_TRANSITIONS[runtime.state]: raise InvalidRuntimeTransition(f"{runtime.state.value} -> {state.value}")
+        runtime.state, runtime.updated_at = state, now_iso()
+        if provider is not None: runtime.provider = provider
+        if provider_ref is not None: runtime.provider_ref = provider_ref
+        runtime.failure_reason = failure_reason
+        self.repository.update(runtime)
+        return runtime

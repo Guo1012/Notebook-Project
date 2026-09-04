@@ -1,225 +1,71 @@
 from pathlib import Path
+import os
 import sqlite3
+from .models import DesiredState, RuntimeRecord, RuntimeState
 
-from .models import (
-    RuntimeRecord,
-    RuntimeState,
-)
-
+ACTIVE_STATES = (RuntimeState.QUEUED, RuntimeState.REQUESTED, RuntimeState.PROVISIONING, RuntimeState.STARTING, RuntimeState.READY, RuntimeState.STOPPING)
 
 class RuntimeRepository:
-
-    ACTIVE_STATES = (
-        RuntimeState.REQUESTED,
-        RuntimeState.PROVISIONING,
-        RuntimeState.STARTING,
-        RuntimeState.READY,
-    )
-
-    def __init__(
-        self,
-        db_path: Path,
-    ):
-        self.db_path = db_path
-
-        self.db_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
+    def __init__(self, db_path: Path | None = None):
+        self.db_path = db_path or Path(os.getenv("LUMEN_RUNTIME_DB_PATH", Path(__file__).parent.parent / "data" / "runtime.db"))
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self):
-        connection = sqlite3.connect(
-            self.db_path
-        )
-
+        connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-
         return connection
 
     def _init_db(self):
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS runtimes (
+        with self._connect() as connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS user_runtimes (
                     runtime_id TEXT PRIMARY KEY,
-                    notebook_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL,
                     profile TEXT NOT NULL,
-
                     state TEXT NOT NULL,
-
+                    desired_state TEXT NOT NULL,
                     provider TEXT NOT NULL,
                     provider_ref TEXT,
-
-                    jupyter_token TEXT NOT NULL,
-
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
+                    updated_at TEXT NOT NULL,
+                    last_activity_at TEXT NOT NULL,
+                    failure_reason TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS unique_active_user_runtime
+                ON user_runtimes(owner_user_id)
+                WHERE state IN ('QUEUED','REQUESTED','PROVISIONING','STARTING','READY','STOPPING');
+                CREATE INDEX IF NOT EXISTS idx_user_runtimes_state ON user_runtimes(state, updated_at);
+            """)
 
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS
-                idx_runtimes_notebook
-                ON runtimes(notebook_id)
-                """
-            )
+    def create(self, runtime: RuntimeRecord) -> None:
+        with self._connect() as connection:
+            connection.execute("INSERT INTO user_runtimes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", self._values(runtime))
 
-    def _row_to_record(
-        self,
-        row: sqlite3.Row,
-    ) -> RuntimeRecord:
+    def get(self, runtime_id: str) -> RuntimeRecord | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM user_runtimes WHERE runtime_id=?", (runtime_id,)).fetchone()
+        return self._row(row) if row else None
 
-        return RuntimeRecord(
-            runtime_id=row["runtime_id"],
-            notebook_id=row["notebook_id"],
-            profile=row["profile"],
+    def get_for_user(self, runtime_id: str, user_id: str) -> RuntimeRecord | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM user_runtimes WHERE runtime_id=? AND owner_user_id=?", (runtime_id, user_id)).fetchone()
+        return self._row(row) if row else None
 
-            state=RuntimeState(row["state"]),
+    def find_active_by_user(self, user_id: str) -> RuntimeRecord | None:
+        placeholders = ",".join("?" for _ in ACTIVE_STATES)
+        with self._connect() as connection:
+            row = connection.execute(f"SELECT * FROM user_runtimes WHERE owner_user_id=? AND state IN ({placeholders}) ORDER BY created_at DESC LIMIT 1", (user_id, *(state.value for state in ACTIVE_STATES))).fetchone()
+        return self._row(row) if row else None
 
-            provider=row["provider"],
-            provider_ref=row["provider_ref"],
+    def update(self, runtime: RuntimeRecord) -> None:
+        with self._connect() as connection:
+            connection.execute("""UPDATE user_runtimes SET profile=?,state=?,desired_state=?,provider=?,provider_ref=?,updated_at=?,last_activity_at=?,failure_reason=? WHERE runtime_id=? AND owner_user_id=?""", (runtime.profile, runtime.state.value, runtime.desired_state.value, runtime.provider, runtime.provider_ref, runtime.updated_at, runtime.last_activity_at, runtime.failure_reason, runtime.runtime_id, runtime.owner_user_id))
 
-            jupyter_token=row["jupyter_token"],
+    @staticmethod
+    def _values(r: RuntimeRecord):
+        return (r.runtime_id, r.owner_user_id, r.profile, r.state.value, r.desired_state.value, r.provider, r.provider_ref, r.created_at, r.updated_at, r.last_activity_at, r.failure_reason)
 
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-    def create(
-        self,
-        runtime: RuntimeRecord,
-    ) -> None:
-
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO runtimes (
-                    runtime_id,
-                    notebook_id,
-                    profile,
-                    state,
-                    provider,
-                    provider_ref,
-                    jupyter_token,
-                    created_at,
-                    updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    runtime.runtime_id,
-                    runtime.notebook_id,
-                    runtime.profile,
-                    runtime.state.value,
-                    runtime.provider,
-                    runtime.provider_ref,
-                    runtime.jupyter_token,
-                    runtime.created_at,
-                    runtime.updated_at,
-                ),
-            )
-
-    def update(
-        self,
-        runtime: RuntimeRecord,
-    ) -> None:
-
-        with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE runtimes
-                SET
-                    state = ?,
-                    provider_ref = ?,
-                    updated_at = ?
-                WHERE runtime_id = ?
-                """,
-                (
-                    runtime.state.value,
-                    runtime.provider_ref,
-                    runtime.updated_at,
-                    runtime.runtime_id,
-                ),
-            )
-
-    def get(
-        self,
-        runtime_id: str,
-    ) -> RuntimeRecord | None:
-
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT *
-                FROM runtimes
-                WHERE runtime_id = ?
-                """,
-                (runtime_id,),
-            ).fetchone()
-
-        if row is None:
-            return None
-
-        return self._row_to_record(row)
-
-    def find_active_by_notebook(
-        self,
-        notebook_id: str,
-    ) -> RuntimeRecord | None:
-
-        states = tuple(
-            state.value
-            for state in self.ACTIVE_STATES
-        )
-
-        placeholders = ",".join(
-            "?"
-            for _ in states
-        )
-
-        with self._connect() as conn:
-            row = conn.execute(
-                f"""
-                SELECT *
-                FROM runtimes
-                WHERE notebook_id = ?
-                  AND state IN ({placeholders})
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (
-                    notebook_id,
-                    *states,
-                ),
-            ).fetchone()
-
-        if row is None:
-            return None
-
-        return self._row_to_record(row)
-
-    def list_non_stopped(
-        self,
-    ) -> list[RuntimeRecord]:
-
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM runtimes
-                WHERE state != ?
-                ORDER BY created_at
-                """,
-                (
-                    RuntimeState.STOPPED.value,
-                ),
-            ).fetchall()
-
-        return [
-            self._row_to_record(row)
-            for row in rows
-        ]
+    @staticmethod
+    def _row(row) -> RuntimeRecord:
+        return RuntimeRecord(row["runtime_id"], row["owner_user_id"], row["profile"], RuntimeState(row["state"]), DesiredState(row["desired_state"]), row["provider"], row["provider_ref"], row["created_at"], row["updated_at"], row["last_activity_at"], row["failure_reason"])

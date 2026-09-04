@@ -1,3 +1,5 @@
+import urllib.error
+import urllib.request
 import docker
 
 from .base import (
@@ -12,7 +14,13 @@ from .base import (
 class DockerRuntimeProvider(RuntimeProvider):
 
     def __init__(self):
-        self.client = docker.from_env()
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = docker.from_env()
+        return self._client
 
     def create(
         self,
@@ -26,12 +34,14 @@ class DockerRuntimeProvider(RuntimeProvider):
             environment={
                 "JUPYTER_TOKEN": spec.jupyter_token,
             },
+            command=["start-notebook.py", f"--ServerApp.token={spec.jupyter_token}", "--ServerApp.allow_origin=*"],
             ports={
                 "8888/tcp": ("127.0.0.1", None),
             },
+            volumes={f"lumen-user-{spec.user_id}": {"bind": "/home/jovyan/work", "mode": "rw"}},
             labels={
                 "qmentor.runtime-id": spec.runtime_id,
-                "qmentor.notebook-id": spec.notebook_id,
+                "qmentor.user-id": spec.user_id,
                 "qmentor.managed-by": "runtime-service",
             },
         )
@@ -67,12 +77,23 @@ class DockerRuntimeProvider(RuntimeProvider):
             .get("Status")
         )
 
-        ready = running and health == "healthy"
+        ready = False
+        if running:
+            try:
+                endpoint = self.get_endpoint(ref)
+                with urllib.request.urlopen(f"http://{endpoint.host}:{endpoint.port}/api/status", timeout=1):
+                    ready = True
+            except urllib.error.HTTPError:
+                # An HTTP response (including auth rejection) means Jupyter's
+                # Tornado application is accepting requests, not just TCP.
+                ready = True
+            except Exception:
+                ready = False
 
         return ProviderRuntimeStatus(
             running=running,
             ready=ready,
-            detail=health or container.status,
+            detail=("ready" if ready else health or container.status),
         )
 
     def terminate(

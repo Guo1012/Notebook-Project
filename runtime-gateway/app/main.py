@@ -1,5 +1,11 @@
 from typing import Any
+import base64
+import hashlib
+import hmac
+import json
 import logging
+import os
+import time
 
 import aiohttp
 import asyncio
@@ -17,9 +23,11 @@ logger = logging.getLogger("runtime-gateway")
 app = FastAPI()
 
 
-RUNTIME_SERVICE_URL = (
-    "http://127.0.0.1:8100"
-)
+RUNTIME_SERVICE_URL = os.getenv("LUMEN_RUNTIME_SERVICE_URL", "http://127.0.0.1:8100")
+INTERNAL_SECRET = os.getenv("LUMEN_INTERNAL_SECRET", "development-internal-change-me")
+SESSION_SECRET = os.getenv("LUMEN_SESSION_SECRET", "development-only-change-me").encode()
+kernel_by_notebook: dict[tuple[str, str, str], dict[str, Any]] = {}
+kernel_lock = asyncio.Lock()
 
 
 HOP_BY_HOP_REQUEST_HEADERS = {
@@ -57,6 +65,7 @@ HOP_BY_HOP_RESPONSE_HEADERS = {
 
 async def get_runtime_connection(
     runtime_id: str,
+    user_id: str,
 ) -> dict[str, Any]:
 
     url = (
@@ -67,7 +76,7 @@ async def get_runtime_connection(
 
     async with aiohttp.ClientSession() as session:
 
-        async with session.get(url) as response:
+        async with session.get(url, headers={"X-Lumen-User-Id": user_id, "X-Lumen-Internal-Secret": INTERNAL_SECRET}) as response:
 
             data = await response.json()
 
@@ -94,6 +103,19 @@ async def get_runtime_connection(
 
             return data
 
+def authenticated_user_id(cookies) -> str:
+    try:
+        token = cookies.get("lumen_session")
+        if not token: raise ValueError("missing")
+        body, signature = token.rsplit(".", 1)
+        expected = hmac.new(SESSION_SECRET, body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected): raise ValueError("signature")
+        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if int(payload["exp"]) < int(time.time()): raise ValueError("expired")
+        return str(payload["sub"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=401, detail="Login required")
+
 
 def build_upstream_headers(
     request: Request,
@@ -118,6 +140,8 @@ def build_upstream_headers(
 
         # 避免压缩响应处理复杂化。
         if lower == "accept-encoding":
+            continue
+        if lower == "x-lumen-notebook-id":
             continue
 
         headers[key] = value
@@ -166,11 +190,8 @@ async def proxy_http(
     request: Request,
 ):
 
-    connection = (
-        await get_runtime_connection(
-            runtime_id
-        )
-    )
+    user_id = authenticated_user_id(request.cookies)
+    connection = await get_runtime_connection(runtime_id, user_id)
 
     host = connection["host"]
     port = connection["port"]
@@ -191,6 +212,14 @@ async def proxy_http(
     )
 
     body = await request.body()
+
+    notebook_id = request.headers.get("x-lumen-notebook-id")
+    mapping_key = (user_id, runtime_id, notebook_id) if notebook_id else None
+    if request.method == "POST" and path == "api/kernels" and mapping_key:
+        async with kernel_lock:
+            existing = kernel_by_notebook.get(mapping_key)
+            if existing:
+                return Response(content=json.dumps(existing), status_code=200, media_type="application/json")
 
     async with aiohttp.ClientSession(
         auto_decompress=True,
@@ -214,6 +243,17 @@ async def proxy_http(
                 )
             )
 
+            if request.method == "POST" and path == "api/kernels" and mapping_key and upstream.status < 300:
+                try:
+                    kernel_by_notebook[mapping_key] = json.loads(response_body)
+                except (TypeError, ValueError):
+                    pass
+            if request.method == "DELETE" and path.startswith("api/kernels/"):
+                deleted_id = path.split("/")[2]
+                for key, value in list(kernel_by_notebook.items()):
+                    if key[:2] == (user_id, runtime_id) and value.get("id") == deleted_id:
+                        kernel_by_notebook.pop(key, None)
+
             return Response(
                 content=response_body,
                 status_code=upstream.status,
@@ -230,11 +270,8 @@ async def proxy_websocket(
 ):
     # 1. 找到 Runtime 的真实连接信息
     try:
-        connection = (
-            await get_runtime_connection(
-                runtime_id
-            )
-        )
+        user_id = authenticated_user_id(websocket.cookies)
+        connection = await get_runtime_connection(runtime_id, user_id)
     except HTTPException as error:
         if error.status_code == 404:
             await websocket.close(code=4404)

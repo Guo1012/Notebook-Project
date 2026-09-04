@@ -23,7 +23,7 @@ class InternalEndpoint:
 @dataclass
 class RuntimeSpec:
     runtime_id: str
-    notebook_id: str
+    user_id: str
     image: str
     jupyter_token: str
 
