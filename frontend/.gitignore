@@ -1,0 +1,11 @@
+# dependencies
+node_modules
+
+# svelte-kit generated files
+.svelte-kit
+
+# production build output
+build
+
+# environment
+.env

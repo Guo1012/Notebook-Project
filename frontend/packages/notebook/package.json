@@ -1,0 +1,78 @@
+{
+  "name": "@lumen/notebook",
+  "version": "0.1.0",
+  "description": "A Svelte 5 rendering layer for Jupyter notebooks with thin adapters around Jupyter protocol and editor packages.",
+  "type": "module",
+  "svelte": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "svelte": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "ARCHITECTURE.md"
+  ],
+  "sideEffects": [
+    "**/*.svelte"
+  ],
+  "keywords": [
+    "jupyter",
+    "notebook",
+    "ipynb",
+    "svelte",
+    "circuit"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "package": "svelte-package -i src -o dist",
+    "prepack": "npm run package",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "svelte": "^5.0.0"
+  },
+  "dependencies": {
+    "@jupyter/ydoc": "^4.0.0",
+    "@jupyterlab/codeeditor": "^4.7.0-alpha.1",
+    "@jupyterlab/codemirror": "^4.7.0-alpha.1",
+    "@jupyterlab/coreutils": "^6.7.0-alpha.1",
+    "@jupyterlab/docregistry": "^4.7.0-alpha.1",
+    "@jupyterlab/documentsearch": "^4.7.0-alpha.1",
+    "@jupyterlab/lsp": "^4.7.0-alpha.1",
+    "@jupyterlab/nbformat": "^4.7.0-alpha.1",
+    "@jupyterlab/observables": "^5.7.0-alpha.1",
+    "@jupyterlab/services": "^7.7.0-alpha.1",
+    "@jupyterlab/settingregistry": "^4.7.0-alpha.1",
+    "@jupyterlab/statusbar": "^4.7.0-alpha.1",
+    "@jupyterlab/toc": "^6.7.0-alpha.1",
+    "@jupyterlab/translation": "^4.7.0-alpha.1",
+    "@lumen/apputils": "0.1.0",
+    "@lumen/cells": "0.1.0",
+    "@lumen/codeeditor": "0.1.0",
+    "@lumen/nbformat": "0.1.0",
+    "@lumen/outputarea": "0.1.0",
+    "@lumen/rendermime": "0.1.0",
+    "@lumen/ui-components": "0.1.0",
+    "@lumino/algorithm": "^2.0.5",
+    "@lumino/commands": "^2.3.4",
+    "@lumino/coreutils": "^2.2.3",
+    "@lumino/disposable": "^2.1.6",
+    "@lumino/messaging": "^2.0.5",
+    "@lumino/polling": "^2.1.6",
+    "@lumino/properties": "^2.0.5",
+    "@lumino/signaling": "^2.1.6",
+    "yjs": "^13.6.27"
+  },
+  "devDependencies": {
+    "@sveltejs/package": "^2.5.8",
+    "svelte": "^5.57.0",
+    "svelte-check": "^4.3.1",
+    "typescript": "^5.9.2"
+  }
+}

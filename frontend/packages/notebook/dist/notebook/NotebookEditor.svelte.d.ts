@@ -1,0 +1,21 @@
+import type { NotebookModel } from '../adapters/docregistry';
+import type { SessionContext } from '../adapters/services';
+import { NotebookController } from './NotebookController';
+import type { NotebookLspAdapter } from '../integrations/NotebookLspAdapter';
+type $$ComponentProps = {
+    model: NotebookModel;
+    session?: SessionContext;
+    controller?: NotebookController;
+    lsp?: NotebookLspAdapter;
+    trusted?: boolean;
+    showToolbar?: boolean;
+    showStatusBar?: boolean;
+    showTableOfContents?: boolean;
+    searchOpen?: boolean;
+    onsave?: () => void | Promise<void>;
+    onselect?: (cellId: string | null) => void;
+    class?: string;
+};
+declare const NotebookEditor: import("svelte").Component<$$ComponentProps, {}, "searchOpen">;
+type NotebookEditor = ReturnType<typeof NotebookEditor>;
+export default NotebookEditor;

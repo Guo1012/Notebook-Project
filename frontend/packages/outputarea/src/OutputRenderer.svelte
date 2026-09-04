@@ -1,0 +1,3 @@
+<script lang="ts">import {RenderMime} from '@lumen/rendermime';import type {NotebookOutput} from '@lumen/nbformat';let {output,trusted=false}:{output:NotebookOutput;trusted?:boolean}=$props();const text=(v:string|string[])=>Array.isArray(v)?v.join(''):v;</script>
+{#if output.output_type==='stream'}<pre class:stderr={output.name==='stderr'}>{text(output.text)}</pre>{:else if output.output_type==='error'}<pre class="error">{output.traceback?.join('\n')||`${output.ename}: ${output.evalue}`}</pre>{:else}<RenderMime data={output.data} {trusted}/>{/if}
+<style>pre{box-sizing:border-box;width:100%;margin:0;padding:10px 16px;overflow:auto;white-space:pre-wrap;font:12px/1.6 ui-monospace,monospace}.stderr,.error{color:#a33f35;background:#fff7f5}</style>

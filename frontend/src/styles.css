@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,500&display=swap');
+
+:root {
+  --paper: #f6f5f0;
+  --paper-deep: #ecebe4;
+  --ink: #18211b;
+  --muted: #747970;
+  --line: #deddd5;
+  --sage: #718d79;
+  --sage-dark: #506b58;
+  --sage-soft: #e5ede5;
+  --terracotta: #c66f52;
+  --shadow: 0 15px 40px #20291f20;
+  --font-display: 'Newsreader', Georgia, serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'DM Mono', ui-monospace, monospace;
+  font-family: var(--font-body);
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; min-width: 320px; min-height: 100%; }
+body { background: var(--paper); }
+button, input, textarea { font-family: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--sage); outline-offset: 2px; }
+::selection { background: #b7cbbd88; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: #b8bab2; background-clip: content-box; }
