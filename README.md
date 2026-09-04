@@ -1,4 +1,8 @@
-# Jupyter 概念验证
+# Notebook-Project
+
+Lumen 是一个面向量子计算与 Python 实验场景的多用户在线 Notebook 平台，支持用户登录、Notebook 持久化、文件管理、代码执行和 Kernel 生命周期管理。系统采用“一名用户一个 Jupyter Server、一个 Notebook 一个 Kernel”的隔离方式，并在用户首次运行代码时按需启动 Docker 运行环境。
+
+## Jupyter 概念验证
 
 ## portal-web: 测试演示前端
 
