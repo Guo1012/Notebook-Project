@@ -2,7 +2,7 @@ import type { JSONValue, MimeBundle, NotebookOutput } from '@lumen/nbformat';
 import { ServerConnection, type ServerConnectionOptions } from './connection';
 
 export type KernelStatus = 'unknown' | 'starting' | 'idle' | 'busy' | 'restarting' | 'dead';
-export interface ExecutableCell { id?: string; source: string }
+export interface ExecutableCell { id?: string; source: string; traceId?: string }
 export interface ExecutionResult { executionCount: number | null; outputs: NotebookOutput[] }
 export interface KernelAdapter {
   readonly name: string;
@@ -38,8 +38,9 @@ export class JupyterKernel implements KernelAdapter {
     this.connection = new ServerConnection(options);
   }
 
-  async execute(code: string): Promise<ExecutionResult> {
-    await this.ensureConnected();
+  async execute(code: string, cell?: ExecutableCell): Promise<ExecutionResult> {
+    const traceId = cell?.traceId ?? crypto.randomUUID();
+    await this.ensureConnected(traceId);
     const socket = this.socket;
     if (!socket) throw new Error('Kernel WebSocket is unavailable');
     const msgId = crypto.randomUUID();
@@ -133,17 +134,22 @@ export class JupyterKernel implements KernelAdapter {
     this.kernelId = null;
   }
 
-  private async ensureConnected(): Promise<void> {
+  private async ensureConnected(traceId: string): Promise<void> {
     if (!this.kernelId) {
+      const headers: Record<string, string> = { 'X-Request-Id': traceId };
+      if (this.options.notebookId) headers['X-Lumen-Notebook-Id'] = this.options.notebookId;
       const response = await this.connection.request('/api/kernels', {
         method: 'POST',
-        headers: this.options.notebookId ? { 'X-Lumen-Notebook-Id': this.options.notebookId } : undefined,
+        headers,
         body: JSON.stringify({ name: this.name })
       });
       this.kernelId = (await response.json() as { id: string }).id;
     }
     if (this.socket?.readyState === WebSocket.OPEN) return;
-    this.socket = this.connection.createWebSocket(`/api/kernels/${this.kernelId}/channels`, { session_id: this.sessionId });
+    this.socket = this.connection.createWebSocket(`/api/kernels/${this.kernelId}/channels`, {
+      session_id: this.sessionId,
+      trace_id: traceId
+    });
     await new Promise<void>((resolve, reject) => {
       this.socket!.addEventListener('open', () => resolve(), { once: true });
       this.socket!.addEventListener('error', () => reject(new Error('Unable to connect to Jupyter kernel')), { once: true });

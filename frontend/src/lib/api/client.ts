@@ -1,4 +1,5 @@
 import { goto } from '$app/navigation';
+import { newTraceId, trace, traceError } from '$lib/trace';
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly detail?: unknown) {
@@ -8,8 +9,25 @@ export class ApiError extends Error {
 
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
+  const requestId = headers.get('X-Request-Id') ?? newTraceId();
+  headers.set('X-Request-Id', requestId);
   if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
-  const response = await fetch(path, { ...init, headers, credentials: 'include' });
+  const started = performance.now();
+  trace('api_request_started', { requestId, method: init.method ?? 'GET', path });
+  let response: Response;
+  try {
+    response = await fetch(path, { ...init, headers, credentials: 'include' });
+  } catch (error) {
+    traceError('api_request_failed', error, { requestId, method: init.method ?? 'GET', path });
+    throw error;
+  }
+  trace('api_request_finished', {
+    requestId,
+    method: init.method ?? 'GET',
+    path,
+    status: response.status,
+    durationMs: Math.round(performance.now() - started)
+  });
   if (response.ok) return response;
   let body: { detail?: { code?: string; message?: string } | string } = {};
   try { body = await response.json(); } catch { /* use status text */ }

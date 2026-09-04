@@ -11,8 +11,9 @@ export class JupyterKernel {
         this.name = options.kernelName ?? 'python3';
         this.connection = new ServerConnection(options);
     }
-    async execute(code) {
-        await this.ensureConnected();
+    async execute(code, cell) {
+        const traceId = cell?.traceId ?? crypto.randomUUID();
+        await this.ensureConnected(traceId);
         const socket = this.socket;
         if (!socket)
             throw new Error('Kernel WebSocket is unavailable');
@@ -131,18 +132,24 @@ export class JupyterKernel {
             await this.connection.request(`/api/kernels/${this.kernelId}`, { method: 'DELETE' });
         this.kernelId = null;
     }
-    async ensureConnected() {
+    async ensureConnected(traceId) {
         if (!this.kernelId) {
+            const headers = { 'X-Request-Id': traceId };
+            if (this.options.notebookId)
+                headers['X-Lumen-Notebook-Id'] = this.options.notebookId;
             const response = await this.connection.request('/api/kernels', {
                 method: 'POST',
-                headers: this.options.notebookId ? { 'X-Lumen-Notebook-Id': this.options.notebookId } : undefined,
+                headers,
                 body: JSON.stringify({ name: this.name })
             });
             this.kernelId = (await response.json()).id;
         }
         if (this.socket?.readyState === WebSocket.OPEN)
             return;
-        this.socket = this.connection.createWebSocket(`/api/kernels/${this.kernelId}/channels`, { session_id: this.sessionId });
+        this.socket = this.connection.createWebSocket(`/api/kernels/${this.kernelId}/channels`, {
+            session_id: this.sessionId,
+            trace_id: traceId
+        });
         await new Promise((resolve, reject) => {
             this.socket.addEventListener('open', () => resolve(), { once: true });
             this.socket.addEventListener('error', () => reject(new Error('Unable to connect to Jupyter kernel')), { once: true });

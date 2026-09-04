@@ -3,8 +3,8 @@ import { NotebookModel } from './notebookModel';
 import type { CellType, Notebook, NotebookCell, NotebookJSON } from './types';
 
 interface NotebookResponse {
-  notebookId: string; title: string; revision: number; content: NotebookJSON;
-  createdAt: string; updatedAt: string;
+  notebookId: string; title?: string; revision: number; content: NotebookJSON;
+  createdAt?: string; updatedAt?: string;
 }
 
 export function uid(prefix = 'id') {
@@ -33,10 +33,10 @@ export function createNotebook(title = '未命名 Notebook'): Notebook {
 function fromResponse(value: NotebookResponse): Notebook {
   const notebook = NotebookModel.fromJSON(value.content);
   notebook.id = value.notebookId;
-  notebook.title = value.title;
+  if (value.title) notebook.title = value.title;
   notebook.revision = value.revision;
-  notebook.createdAt = value.createdAt;
-  notebook.updatedAt = value.updatedAt;
+  if (value.createdAt) notebook.createdAt = value.createdAt;
+  if (value.updatedAt) notebook.updatedAt = value.updatedAt;
   return notebook;
 }
 

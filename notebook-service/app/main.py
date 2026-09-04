@@ -1,93 +1,160 @@
-import os
-from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile, status
-from fastapi.responses import FileResponse
+"""应用装配：app 工厂、router、middleware、异常映射。
 
-from .auth import COOKIE_NAME, CurrentUser, create_session_token, require_user
-from .database import Database
-from .files import FileNotFound, FileTooLarge, UserFileRepository
-from .models import BootstrapUserRequest, CreateNotebookRequest, FileListResponse, LoginRequest, NotebookListResponse, NotebookResponse, NotebookSummary, RenameNotebookRequest, SaveNotebookRequest, UploadedFileResponse, UserResponse
-from .repository import NotebookNotFound, NotebookRepository, RevisionConflict, UserRepository, UsernameExists
+使用 Uvicorn factory 模式启动（不做模块级 app 实例，避免 import 时触碰
+真实数据目录）：
 
-app = FastAPI(title="Lumen Backend API", version="1.0.0")
-database = Database()
-users = UserRepository(database)
-notebooks = NotebookRepository(database)
-user_files = UserFileRepository(database)
+    uvicorn app.main:create_app --factory
+"""
+from __future__ import annotations
 
-def user_response(user: CurrentUser) -> UserResponse:
-    return UserResponse(id=user.user_id, username=user.username, displayName=user.display_name)
+import logging
+from dataclasses import dataclass
 
-def not_found() -> HTTPException:
-    return HTTPException(status_code=404, detail={"code": "NOTEBOOK_NOT_FOUND", "message": "Notebook not found"})
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException
 
-@app.get("/healthz")
-def healthz(): return {"status": "ok"}
+from .api import auth, health, legacy, notebooks
+from .config import Settings, load_settings
+from .database import build_engine, build_session_factory
+from .errors import (
+    DomainError,
+    InternalError,
+    InvalidRequest,
+    MalformedJson,
+    StorageUnavailable,
+)
+from .middleware import RequestIdMiddleware, SizeLimitMiddleware, error_body
+from .repositories.sqlalchemy import SqlAlchemyNotebookRepository
+from .services.notebooks import NotebookService
+from .storage.local import LocalBlobStore
 
-@app.post("/api/auth/bootstrap", response_model=UserResponse, status_code=201)
-def bootstrap(req: BootstrapUserRequest):
-    if os.getenv("LUMEN_ALLOW_BOOTSTRAP", "false").lower() != "true": raise HTTPException(status_code=404, detail="Not found")
-    try: return user_response(users.create(req.username, req.displayName, req.password))
-    except UsernameExists: raise HTTPException(status_code=409, detail={"code": "USERNAME_EXISTS", "message": "Username already exists"})
+logger = logging.getLogger("notebook_service")
 
-@app.post("/api/auth/login", response_model=UserResponse)
-def login(req: LoginRequest, response: Response):
-    user = users.authenticate(req.username, req.password)
-    if user is None: raise HTTPException(status_code=401, detail={"code": "INVALID_CREDENTIALS", "message": "Invalid username or password"})
-    response.set_cookie(COOKIE_NAME, create_session_token(user), httponly=True, secure=os.getenv("LUMEN_COOKIE_SECURE", "true").lower() == "true", samesite="lax", max_age=28_800, path="/")
-    return user_response(user)
+# 新 v1 契约作用的路径前缀；其余路径（旧 POC route、/docs、/openapi.json 等）
+# 保持原有错误行为。
+_V1_PREFIXES = ("/api/v1", "/health")
 
-@app.post("/api/auth/logout", status_code=204)
-def logout(response: Response): response.delete_cookie(COOKIE_NAME, path="/")
 
-@app.get("/api/auth/me", response_model=UserResponse)
-def me(user: CurrentUser = Depends(require_user)): return user_response(user)
+@dataclass
+class AppContext:
+    settings: Settings
+    engine: object
+    session_factory: object
+    repository: SqlAlchemyNotebookRepository
+    blob_store: LocalBlobStore
+    service: NotebookService
 
-@app.get("/api/notebooks", response_model=NotebookListResponse)
-def list_notebooks(user: CurrentUser = Depends(require_user)):
-    return NotebookListResponse(items=[NotebookSummary(notebookId=r["notebookId"], title=r["title"], revision=r["revision"], cellCount=len(r["content"].get("cells", [])), createdAt=r["createdAt"], updatedAt=r["updatedAt"]) for r in notebooks.list(user.user_id)])
 
-@app.post("/api/notebooks", response_model=NotebookResponse, status_code=201)
-def create_notebook(req: CreateNotebookRequest, user: CurrentUser = Depends(require_user)):
-    return NotebookResponse(**notebooks.create(user.user_id, req.title, req.content))
+def create_app(settings: Settings | None = None) -> FastAPI:
+    # 配置错误/存储不可用时在启动阶段快速失败。
+    settings = settings or load_settings()
+    engine = build_engine(settings.database_url)
+    session_factory = build_session_factory(engine)
+    repository = SqlAlchemyNotebookRepository(
+        session_factory, settings.idempotency_ttl_seconds
+    )
+    blob_store = LocalBlobStore(settings.blob_root)
+    service = NotebookService(repository, blob_store)
 
-@app.get("/api/notebooks/{notebook_id}", response_model=NotebookResponse)
-def get_notebook(notebook_id: str, user: CurrentUser = Depends(require_user)):
-    try: return NotebookResponse(**notebooks.get(user.user_id, notebook_id))
-    except NotebookNotFound: raise not_found()
+    app = FastAPI(title="Notebook Service API", version="1.0.0-draft.1")
+    app.state.context = AppContext(
+        settings=settings,
+        engine=engine,
+        session_factory=session_factory,
+        repository=repository,
+        blob_store=blob_store,
+        service=service,
+    )
 
-@app.put("/api/notebooks/{notebook_id}", response_model=NotebookResponse)
-def save_notebook(notebook_id: str, req: SaveNotebookRequest, user: CurrentUser = Depends(require_user)):
-    try: return NotebookResponse(**notebooks.save(user.user_id, notebook_id, req.baseRevision, req.content, req.title))
-    except NotebookNotFound: raise not_found()
-    except RevisionConflict as error: raise HTTPException(status_code=409, detail={"code": "REVISION_CONFLICT", "message": "Revision conflict", "currentRevision": error.current_revision})
+    # 先注册 SizeLimit（内层），后注册 RequestId（外层）：RequestId 保证所有
+    # 响应（含 413 提前拒绝）都携带同一个 X-Request-ID。
+    app.add_middleware(SizeLimitMiddleware, limit_bytes=settings.max_request_bytes)
+    app.add_middleware(RequestIdMiddleware)
 
-@app.patch("/api/notebooks/{notebook_id}", response_model=NotebookResponse)
-def rename_notebook(notebook_id: str, req: RenameNotebookRequest, user: CurrentUser = Depends(require_user)):
-    try: return NotebookResponse(**notebooks.rename(user.user_id, notebook_id, req.title))
-    except NotebookNotFound: raise not_found()
+    _register_exception_handlers(app)
 
-@app.delete("/api/notebooks/{notebook_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_notebook(notebook_id: str, user: CurrentUser = Depends(require_user)):
-    try: notebooks.delete(user.user_id, notebook_id)
-    except NotebookNotFound: raise not_found()
+    app.include_router(notebooks.router)
+    app.include_router(auth.router)
+    app.include_router(health.router)
+    app.include_router(legacy.router)
+    return app
 
-@app.get("/api/files", response_model=FileListResponse)
-def list_files(user: CurrentUser = Depends(require_user)):
-    return FileListResponse(items=[UploadedFileResponse(**item) for item in user_files.list(user.user_id)])
 
-@app.post("/api/files", response_model=list[UploadedFileResponse], status_code=201)
-async def upload_files(files: list[UploadFile] = File(...), user: CurrentUser = Depends(require_user)):
-    try: return [UploadedFileResponse(**(await user_files.save(user.user_id, upload))) for upload in files]
-    except FileTooLarge: raise HTTPException(status_code=413, detail={"code": "FILE_TOO_LARGE", "message": "Uploaded file exceeds size limit"})
+def _is_v1(request: Request) -> bool:
+    return request.scope.get("path", "").startswith(_V1_PREFIXES)
 
-@app.get("/api/files/{file_id}")
-def download_file(file_id: str, user: CurrentUser = Depends(require_user)):
-    try:
-        path, record = user_files.resolve(user.user_id, file_id)
-        return FileResponse(path, filename=record["name"], media_type=record["type"])
-    except FileNotFound: raise HTTPException(status_code=404, detail={"code": "FILE_NOT_FOUND", "message": "File not found"})
 
-@app.delete("/api/files/{file_id}", status_code=204)
-def delete_file(file_id: str, user: CurrentUser = Depends(require_user)):
-    try: user_files.delete(user.user_id, file_id)
-    except FileNotFound: raise HTTPException(status_code=404, detail={"code": "FILE_NOT_FOUND", "message": "File not found"})
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", "")
+
+
+def _validation_details(errors) -> dict | None:
+    first = errors[0] if errors else None
+    if first is None:
+        return None
+    loc = first.get("loc", ())
+    if loc and loc[0] == "header":
+        pointer = "/headers/" + str(loc[1])
+    elif loc and loc[0] in ("body", "query", "path"):
+        pointer = "/" + "/".join(str(part) for part in loc[1:])
+    else:
+        pointer = "/"
+    return {"path": pointer, "reason": first.get("msg", "Invalid value")}
+
+
+def _register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(DomainError)
+    async def domain_error_handler(request: Request, exc: DomainError):
+        body = error_body(
+            exc.code, exc.message, _request_id(request), exc.details
+        )
+        headers = {}
+        if isinstance(exc, StorageUnavailable):
+            headers["Retry-After"] = "5"
+        return JSONResponse(
+            status_code=exc.http_status, headers=headers, content=body
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(
+        request: Request, exc: RequestValidationError
+    ):
+        if not _is_v1(request):
+            # 旧 POC route 保持 FastAPI 默认 422 响应结构。
+            return JSONResponse(
+                status_code=422,
+                content={"detail": jsonable_encoder(exc.errors())},
+            )
+        if any(error.get("type") == "json_invalid" for error in exc.errors()):
+            error = MalformedJson()
+        else:
+            error = InvalidRequest(details=_validation_details(exc.errors()))
+        return JSONResponse(
+            status_code=error.http_status,
+            content=error_body(
+                error.code, error.message, _request_id(request), error.details
+            ),
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        if isinstance(exc, HTTPException) or not _is_v1(request):
+            # 旧 POC route 与框架 4xx/5xx 保持原有行为（交给默认处理器）。
+            raise exc
+        logger.exception(
+            "未处理异常 request_id=%s path=%s",
+            _request_id(request),
+            request.scope.get("path"),
+        )
+        error = InternalError()
+        request_id = _request_id(request)
+        # 该响应由 ServerErrorMiddleware 直接发送，绕过 RequestId middleware 的
+        # send 包装，因此这里显式携带 X-Request-ID 响应头。
+        return JSONResponse(
+            status_code=500,
+            headers={"X-Request-ID": request_id},
+            content=error_body(error.code, error.message, request_id),
+        )

@@ -4,6 +4,7 @@ export type KernelStatus = 'unknown' | 'starting' | 'idle' | 'busy' | 'restartin
 export interface ExecutableCell {
     id?: string;
     source: string;
+    traceId?: string;
 }
 export interface ExecutionResult {
     executionCount: number | null;
@@ -29,7 +30,7 @@ export declare class JupyterKernel implements KernelAdapter {
     private kernelId;
     private socket;
     constructor(options: JupyterKernelOptions);
-    execute(code: string): Promise<ExecutionResult>;
+    execute(code: string, cell?: ExecutableCell): Promise<ExecutionResult>;
     interrupt(): Promise<void>;
     restart(): Promise<void>;
     shutdown(): Promise<void>;

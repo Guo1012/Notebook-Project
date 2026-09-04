@@ -9,6 +9,10 @@ from .base import (
     RuntimeProvider,
     RuntimeSpec,
 )
+from ..logging_config import configure_logging
+
+
+logger = configure_logging("runtime-service")
 
 
 class DockerRuntimeProvider(RuntimeProvider):
@@ -27,6 +31,7 @@ class DockerRuntimeProvider(RuntimeProvider):
         spec: RuntimeSpec,
     ) -> ProviderRuntimeRef:
 
+        logger.info("event=docker_container_create_started user_id=%s runtime_id=%s image=%s", spec.user_id, spec.runtime_id, spec.image)
         container = self.client.containers.run(
             spec.image,
             detach=True,
@@ -45,6 +50,8 @@ class DockerRuntimeProvider(RuntimeProvider):
                 "qmentor.managed-by": "runtime-service",
             },
         )
+
+        logger.info("event=docker_container_created user_id=%s runtime_id=%s container_id=%s", spec.user_id, spec.runtime_id, container.id[:12])
 
         return ProviderRuntimeRef(
             id=container.id,
@@ -109,6 +116,7 @@ class DockerRuntimeProvider(RuntimeProvider):
             return
 
         container.remove(force=True)
+        logger.info("event=docker_container_removed container_id=%s", ref.id[:12])
 
     def get_endpoint(
         self,

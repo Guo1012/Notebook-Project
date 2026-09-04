@@ -12,8 +12,9 @@ class RuntimeRepository:
         self._init_db()
 
     def _connect(self):
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=5.0)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
         return connection
 
     def _init_db(self):
@@ -58,9 +59,28 @@ class RuntimeRepository:
             row = connection.execute(f"SELECT * FROM user_runtimes WHERE owner_user_id=? AND state IN ({placeholders}) ORDER BY created_at DESC LIMIT 1", (user_id, *(state.value for state in ACTIVE_STATES))).fetchone()
         return self._row(row) if row else None
 
-    def update(self, runtime: RuntimeRecord) -> None:
+    def update_if_state(self, runtime: RuntimeRecord, expected_state: RuntimeState) -> bool:
         with self._connect() as connection:
-            connection.execute("""UPDATE user_runtimes SET profile=?,state=?,desired_state=?,provider=?,provider_ref=?,updated_at=?,last_activity_at=?,failure_reason=? WHERE runtime_id=? AND owner_user_id=?""", (runtime.profile, runtime.state.value, runtime.desired_state.value, runtime.provider, runtime.provider_ref, runtime.updated_at, runtime.last_activity_at, runtime.failure_reason, runtime.runtime_id, runtime.owner_user_id))
+            cursor = connection.execute(
+                """UPDATE user_runtimes
+                   SET profile=?,state=?,desired_state=?,provider=?,provider_ref=?,
+                       updated_at=?,last_activity_at=?,failure_reason=?
+                   WHERE runtime_id=? AND owner_user_id=? AND state=?""",
+                (
+                    runtime.profile,
+                    runtime.state.value,
+                    runtime.desired_state.value,
+                    runtime.provider,
+                    runtime.provider_ref,
+                    runtime.updated_at,
+                    runtime.last_activity_at,
+                    runtime.failure_reason,
+                    runtime.runtime_id,
+                    runtime.owner_user_id,
+                    expected_state.value,
+                ),
+            )
+            return cursor.rowcount == 1
 
     @staticmethod
     def _values(r: RuntimeRecord):

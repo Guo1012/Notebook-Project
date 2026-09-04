@@ -123,6 +123,7 @@
     if (!notebook || !editorModel) return;
     const current = StoredNotebookModel.fromJSON(editorModel.toJSON() as unknown as NotebookJSON);
     current.id = notebook.id;
+    current.revision = notebook.revision;
     current.title = notebook.title;
     current.createdAt = notebook.createdAt;
     current.updatedAt = notebook.updatedAt;
